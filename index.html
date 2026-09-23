@@ -41,8 +41,9 @@
       <div class="toolbar-info">
         <label for="timeRangeSelect" class="label-badge">Timeframe:</label>
         <select id="timeRangeSelect" class="table-filter" style="margin: 0 10px; font-weight: 600;">
+          <option value="rolling30" selected>Rolling 30 Days</option>
+          <option value="thisMonth">This Month (Current)</option>
           <option value="lastMonth">Last Calendar Month</option>
-          <option value="rolling30">Last 30 Days</option>
         </select>
         <span class="window-range" id="dateRangeText">Loading timeframe...</span>
       </div>
@@ -53,6 +54,25 @@
         </button>
         <button class="btn btn-sm btn-outline" id="exportCsvBtn">Export Report CSV</button>
       </div>
+    </div>
+
+    <!-- Case Type Tab Navigation -->
+    <div class="tabs-nav-container">
+      <button class="tab-nav-btn active" data-tab="ALL">
+        All Inflow <span class="tab-badge" id="badgeAll">0</span>
+      </button>
+      <button class="tab-nav-btn" data-tab="Incident">
+        Incidents <span class="tab-badge" id="badgeIncident">0</span>
+      </button>
+      <button class="tab-nav-btn" data-tab="Service Request">
+        Service Requests <span class="tab-badge" id="badgeSR">0</span>
+      </button>
+      <button class="tab-nav-btn" data-tab="Query">
+        Queries <span class="tab-badge" id="badgeQuery">0</span>
+      </button>
+      <button class="tab-nav-btn" data-tab="Feature Request">
+        Feature Requests <span class="tab-badge" id="badgeFR">0</span>
+      </button>
     </div>
 
     <!-- Executive KPI Metrics -->
@@ -107,7 +127,7 @@
             <label class="toggle-control">
               <input type="checkbox" id="toggleMa" checked />
               <span>Show 7-Day Trendline</span>
-            </label> saz
+            </label>
           </div>
         </div>
         <div class="canvas-container main-canvas">
@@ -185,6 +205,7 @@
               <tr>
                 <th>Case Number</th>
                 <th>Subject</th>
+                <th>Type</th>
                 <th>Priority</th>
                 <th>Origin</th>
                 <th>Routed Timestamp</th>
@@ -192,7 +213,7 @@
               </tr>
             </thead>
             <tbody id="casesTableBody">
-              <!-- Populated by app.js -->
+              <!-- Populated dynamically by app.js -->
             </tbody>
           </table>
         </div>
@@ -209,24 +230,24 @@
       </div>
       <div class="modal-body">
         <label class="form-label" for="queueNameInput">Queue Name</label>
-        <input type="text" id="queueNameInput" class="form-input" value="Tier-1 Support Queue" />
+        <input type="text" id="queueNameInput" class="form-input" value="Admin Queue" />
 
         <label class="form-label" for="queueIdInput">Queue Group ID (00G prefix)</label>
-        <input type="text" id="queueIdInput" class="form-input" value="00G5g000003ABC1" />
+        <input type="text" id="queueIdInput" class="form-input" value="00GOX000004wIAL2A2" />
 
         <h4 class="modal-subheading">1. Standard Inflow Query (Created into Queue)</h4>
-        <pre class="soql-code"><code id="soqlStandard">SELECT Id, CaseNumber, Subject, Priority, Origin, CreatedDate, Status 
+        <pre class="soql-code"><code id="soqlStandard">SELECT Id, CaseNumber, Subject, Status, Automation_Priority__c, Type, CreatedDate 
 FROM Case 
-WHERE OwnerId = '00G5g000003ABC1' 
-AND CreatedDate = LAST_MONTH 
+WHERE Owner.Name = 'Admin Queue' 
+AND CreatedDate = LAST_N_DAYS:30 
 ORDER BY CreatedDate ASC</code></pre>
 
         <h4 class="modal-subheading">2. Case History Query (Reassigned / Picked Out of Queue)</h4>
-        <pre class="soql-code"><code id="soqlHistory">SELECT CaseId, Case.CaseNumber, Case.Priority, Case.Origin, CreatedDate, NewValue 
+        <pre class="soql-code"><code id="soqlHistory">SELECT CaseId, Field, OldValue, NewValue, CreatedDate 
 FROM CaseHistory 
 WHERE Field = 'Owner' 
-AND NewValue = 'Admin Queue' 
-AND CreatedDate = LAST_MONTH</code></pre>
+AND CreatedDate = LAST_N_DAYS:30 
+ORDER BY CreatedDate DESC</code></pre>
       </div>
       <div class="modal-footer">
         <button class="btn btn-primary" id="saveSettingsBtn">Save Changes</button>
