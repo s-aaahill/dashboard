@@ -2,13 +2,12 @@
  * Salesforce Single-Queue Inflow Dashboard Controller
  */
 
-// Application State (Defaults to 'thisMonth' for current month data on load)
 const state = {
   queueName: "Admin Queue",
   timeRange: "thisMonth",
   selectedTab: "ALL",
   selectedWeek: "CURRENT_WEEK",
-  selectedStatusFilter: null, // Set dynamically by clicking the status donut chart
+  selectedStatusFilter: null,
   queueAgents: [],
   weeklyBifurcation: null,
   cases: [],
@@ -35,7 +34,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadDashboardData();
 });
 
-// 1. Timeframe Label Calculation
 function updateDateRangeLabel() {
   const labelElem = document.getElementById("dateRangeText");
   if (!labelElem) return;
@@ -67,7 +65,6 @@ function updateDateRangeLabel() {
   }
 }
 
-// 2. Fetch Data from Backend API
 async function loadDashboardData() {
   updateDateRangeLabel();
   try {
@@ -104,18 +101,6 @@ function normalizeType(rawType) {
   return rawType;
 }
 
-function getWeekRangeLabel(dateObj) {
-  const d = new Date(dateObj);
-  const day = d.getDay();
-  const diffToMon = d.getDate() - day + (day === 0 ? -6 : 1);
-  const mon = new Date(d.setDate(diffToMon));
-  const sun = new Date(mon);
-  sun.setDate(mon.getDate() + 6);
-  const fmt = (dt) => dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  return `${fmt(mon)} - ${fmt(sun)}`;
-}
-
-// 3. Normalization & Mapping
 function mapIncomingRecords(raw) {
   state.cases = raw.map((r, i) => {
     const rawDate = r.CreatedDate || new Date().toISOString();
@@ -131,7 +116,7 @@ function mapIncomingRecords(raw) {
       origin: r.Origin || "Portal",
       routedDate: dateObj,
       dateKey: dateObj.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-      weekLabel: getWeekRangeLabel(dateObj),
+      weekLabel: r.weekLabel || "", // Uses synced week label directly from server.js
       hourOfDay: dateObj.getHours(),
       status: r.Status || "New"
     };
@@ -197,35 +182,17 @@ function populateWeekSelectOptions() {
       optGroup.appendChild(opt);
     });
     select.appendChild(optGroup);
-  } else {
-    const distinctWeeks = Array.from(new Set(state.cases.map((c) => c.weekLabel)));
-    distinctWeeks.sort((a, b) => b.localeCompare(a));
-
-    if (distinctWeeks.length > 0) {
-      const optGroup = document.createElement("optgroup");
-      optGroup.label = "Detected Weeks";
-      distinctWeeks.forEach((wk) => {
-        const opt = document.createElement("option");
-        opt.value = wk;
-        opt.textContent = wk;
-        optGroup.appendChild(opt);
-      });
-      select.appendChild(optGroup);
-    }
   }
 
   select.value = currentVal;
   state.selectedWeek = select.value;
 }
 
-// 4. Fallback Simulator (Configured for Current Month)
 function loadSimulatedData() {
   const generatedCases = [];
   const now = new Date();
   const types = ["Incident", "Service Request", "Query", "Feature Request"];
-  const typeWeights = [0.55, 0.25, 0.15, 0.05];
   const priorities = ["Low", "Medium", "High", "Critical"];
-  const priorityWeights = [0.30, 0.45, 0.20, 0.05];
   const simulatedAgents = state.queueAgents.length > 0 ? state.queueAgents : ["Agent 1", "Agent 2", "Agent 3", "Agent 4"];
   state.queueAgents = simulatedAgents;
 
@@ -235,7 +202,6 @@ function loadSimulatedData() {
   for (let i = numDays - 1; i >= 0; i--) {
     const d = new Date();
     d.setDate(now.getDate() - i);
-
     const isWeekend = d.getDay() === 0 || d.getDay() === 6;
     const dailyVolume = isWeekend ? Math.floor(Math.random() * 2) : Math.floor(Math.random() * 8 + 4);
 
@@ -257,7 +223,7 @@ function loadSimulatedData() {
         origin: "Portal",
         routedDate: ticketDate,
         dateKey: ticketDate.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-        weekLabel: getWeekRangeLabel(ticketDate),
+        weekLabel: "",
         hourOfDay: hour,
         status: status
       });
@@ -278,7 +244,6 @@ function renderDashboard() {
   renderTable();
 }
 
-// 5. 5-Day Work Week Average & SLA Calculations
 function updateKPICards() {
   const total = state.filteredCases.length;
   const totalElem = document.getElementById("kpiTotalInflow");
@@ -332,7 +297,6 @@ function updateKPICards() {
     avgSplitElem.textContent = `${weekdayCases.length} weekday cases / ${businessDaysCount} workdays`;
   }
 
-  // Peak Arrival Day
   const dayMap = {};
   state.filteredCases.forEach((c) => {
     dayMap[c.dateKey] = (dayMap[c.dateKey] || 0) + 1;
@@ -353,7 +317,6 @@ function updateKPICards() {
   const peakCountElem = document.getElementById("kpiPeakCount");
   if (peakCountElem) peakCountElem.textContent = `${peakCount} tickets peak velocity`;
 
-  // Aging Cases in New/Assigned > 24h
   const nowMs = Date.now();
   const agingCases = state.filteredCases.filter((c) => {
     const s = (c.status || "").toLowerCase();
@@ -371,7 +334,6 @@ function updateKPICards() {
   }
 }
 
-// 6. Daily Chart (Continuous Timeline for all Timeframes)
 function renderDailyInflowChart() {
   const canvas = document.getElementById("dailyInflowChart");
   if (!canvas) return;
@@ -474,7 +436,6 @@ function renderDailyInflowChart() {
   });
 }
 
-// 7. Clickable Case Status Breakdown Chart
 function renderStatusChart() {
   const canvas = document.getElementById("statusChart");
   if (!canvas) return;
@@ -525,7 +486,6 @@ function renderStatusChart() {
         if (elements && elements.length > 0) {
           const index = elements[0].index;
           const clickedStatus = labels[index];
-          // Toggle filter on/off
           if (state.selectedStatusFilter === clickedStatus) {
             state.selectedStatusFilter = null;
           } else {
@@ -582,7 +542,6 @@ function renderHourlyCurveChart() {
   });
 }
 
-// 8. Weekly Agent Workload Table (4 Agents x 4 Types)
 function renderAgentWorkloadTable() {
   const tbody = document.getElementById("agentWorkloadTableBody");
   const tfoot = document.getElementById("agentWorkloadTableFoot");
@@ -602,18 +561,17 @@ function renderAgentWorkloadTable() {
   agentList = agentList.slice(0, 4);
 
   const now = new Date();
-  const currentWeekLabel = getWeekRangeLabel(now);
 
   const weekCases = state.filteredCases.filter((c) => {
     if (c.agent === "Unassigned") return false;
 
     if (state.selectedWeek === "CURRENT_WEEK") {
       const diffDays = (now - c.routedDate) / (1000 * 60 * 60 * 24);
-      return diffDays <= 7 || c.weekLabel === currentWeekLabel;
+      return diffDays <= 7;
     } else if (state.selectedWeek === "ALL_WEEKS") {
       return true;
     } else {
-      return c.weekLabel === state.selectedWeek || (c.weekLabel && c.weekLabel.includes(state.selectedWeek));
+      return c.weekLabel === state.selectedWeek;
     }
   });
 
@@ -661,7 +619,6 @@ function renderAgentWorkloadTable() {
   `;
 }
 
-// 9. Case Detail Table (Interactive Filter by Chart Click or Default New/Assigned)
 function renderTable() {
   const tbody = document.getElementById("casesTableBody");
   if (!tbody) return;
@@ -673,14 +630,12 @@ function renderTable() {
   let displayedCases = [];
 
   if (state.selectedStatusFilter) {
-    // Filter strictly by the status clicked on the donut chart
     displayedCases = state.filteredCases.filter((c) => (c.status || "").toLowerCase() === state.selectedStatusFilter.toLowerCase());
     if (filterIndicator) {
       filterIndicator.style.display = "inline-flex";
       activeStatusLabel.textContent = state.selectedStatusFilter;
     }
   } else {
-    // Default requirement: Strictly display open cases (New or Assigned)
     displayedCases = state.filteredCases.filter((c) => {
       const s = (c.status || "").toLowerCase();
       return s === "new" || s === "assigned";
@@ -771,7 +726,6 @@ function setupEventListeners() {
     });
   }
 
-  // Timeframe selector
   const timeSelect = document.getElementById("timeRangeSelect");
   if (timeSelect) {
     timeSelect.addEventListener("change", async (e) => {

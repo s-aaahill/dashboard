@@ -1,6 +1,6 @@
 // server.js
-require('dotenv').config();
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
 const jsforce = require('jsforce');
@@ -11,7 +11,6 @@ const HOST = '0.0.0.0';
 
 app.use(cors());
 app.use(express.json());
-
 app.use(express.static(__dirname));
 
 app.get('/', (req, res) => {
@@ -60,8 +59,6 @@ async function getSalesforceConnection(forceRefresh = false) {
   }
 
   const tokenUrl = `${SF_LOGIN_URL.replace(/\/+$/, '')}/services/oauth2/token`;
-  console.log(`Authenticating via OAuth 2.0 Client Credentials with: ${tokenUrl}`);
-
   const params = new URLSearchParams({
     grant_type: 'client_credentials',
     client_id: SF_CLIENT_ID,
@@ -78,8 +75,6 @@ async function getSalesforceConnection(forceRefresh = false) {
   if (!response.ok) {
     throw new Error(`Salesforce OAuth Error: ${tokenData.error_description || tokenData.error}`);
   }
-
-  console.log('OAuth 2.0 authentication successful.');
 
   cachedConn = new jsforce.Connection({
     instanceUrl: tokenData.instance_url,
@@ -109,7 +104,6 @@ async function getQueueMetadata(conn, targetName) {
   }
 
   cachedQueue = res.records[0];
-  console.log(`[QUEUE RESOLVED] "${cachedQueue.Name}" -> ID: ${cachedQueue.Id}`);
   return cachedQueue;
 }
 
@@ -165,7 +159,6 @@ function generateMonthlyWeekBuckets(year, monthIndex) {
   while (currentStartDay <= lastDayOfMonth) {
     const startDate = new Date(year, monthIndex, currentStartDay);
     const dayOfWeek = startDate.getDay();
-
     const daysToSunday = (7 - dayOfWeek) % 7;
     const currentEndDay = Math.min(currentStartDay + daysToSunday, lastDayOfMonth);
 
@@ -188,12 +181,7 @@ function generateMonthlyWeekBuckets(year, monthIndex) {
   return buckets;
 }
 
-function bifurcateRecordsByWeek(records, year, monthIndex) {
-  const monthNames = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December',
-  ];
-  const weeks = generateMonthlyWeekBuckets(year, monthIndex);
+function bifurcateRecordsByWeek(records, weeks, monthName, year) {
   let monthTotal = 0;
 
   records.forEach((c) => {
@@ -204,6 +192,7 @@ function bifurcateRecordsByWeek(records, year, monthIndex) {
     if (targetWeek) {
       targetWeek.totalInflow++;
       monthTotal++;
+      c.weekLabel = targetWeek.label; // Synchronize weekLabel on record
 
       const type = normalizeType(c.Type);
       targetWeek.typeBreakdown[type] = (targetWeek.typeBreakdown[type] || 0) + 1;
@@ -225,18 +214,13 @@ function bifurcateRecordsByWeek(records, year, monthIndex) {
     }
   });
 
-  const cleanedWeeks = weeks.map(({ startDay, endDay, ...rest }) => rest);
-
   return {
-    month: `${monthNames[monthIndex]} ${year}`,
+    month: `${monthName} ${year}`,
     totalInflow: monthTotal,
-    weeks: cleanedWeeks,
+    weeks: weeks.map(({ startDay, endDay, ...rest }) => rest),
   };
 }
 
-/**
- * GET /api/queue-inflow
- */
 app.get('/api/queue-inflow', async (req, res) => {
   const queueName = req.query.queueName || SF_QUEUE_NAME;
   const rangeParam = req.query.range || 'thisMonth';
@@ -254,10 +238,6 @@ app.get('/api/queue-inflow', async (req, res) => {
     try {
       const conn = await getSalesforceConnection(isRetry);
       const queue = await getQueueMetadata(conn, queueName);
-
-      console.log(`\n======================================================`);
-      console.log(`Fetching Inflow (${rangeParam}) for: "${queue.Name}"`);
-      console.log(`======================================================`);
 
       const directQueueMembers = await getQueueMembers(conn, queue.Id);
 
@@ -377,7 +357,6 @@ app.get('/api/queue-inflow', async (req, res) => {
         (name) => name && !isTargetQueue(name) && name !== 'Automated Process' && name !== 'System'
       );
 
-      // Monthly partitioning for weekly bifurcation
       const now = new Date();
       const currentYear = now.getFullYear();
       const currentMonth = now.getMonth();
@@ -385,6 +364,14 @@ app.get('/api/queue-inflow', async (req, res) => {
       const lastMonthDate = new Date(currentYear, currentMonth - 1, 1);
       const lastYear = lastMonthDate.getFullYear();
       const lastMonth = lastMonthDate.getMonth();
+
+      const monthNames = [
+        'January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December',
+      ];
+
+      const currentMonthBuckets = generateMonthlyWeekBuckets(currentYear, currentMonth);
+      const lastMonthBuckets = generateMonthlyWeekBuckets(lastYear, lastMonth);
 
       const thisMonthRecords = [];
       const lastMonthRecords = [];
@@ -401,10 +388,19 @@ app.get('/api/queue-inflow', async (req, res) => {
         }
       });
 
-      const currentMonthBifurcation = bifurcateRecordsByWeek(thisMonthRecords, currentYear, currentMonth);
-      const lastMonthBifurcation = bifurcateRecordsByWeek(lastMonthRecords, lastYear, lastMonth);
+      const currentMonthBifurcation = bifurcateRecordsByWeek(
+        thisMonthRecords,
+        currentMonthBuckets,
+        monthNames[currentMonth],
+        currentYear
+      );
+      const lastMonthBifurcation = bifurcateRecordsByWeek(
+        lastMonthRecords,
+        lastMonthBuckets,
+        monthNames[lastMonth],
+        lastYear
+      );
 
-      // Precise Timeframe Filter for requested rangeParam
       let displayRecords = unifiedRecords;
 
       if (rangeParam === 'thisMonth') {
