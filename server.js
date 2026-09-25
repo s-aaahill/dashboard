@@ -12,15 +12,12 @@ const HOST = '0.0.0.0';
 app.use(cors());
 app.use(express.json());
 
-// Serve static assets relative to this file's directory
 app.use(express.static(__dirname));
 
-// Explicit fallback to ensure index.html is served on root request
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Environment Configuration
 const {
   SF_LOGIN_URL = 'https://greyorangeorg.my.salesforce.com',
   SF_CLIENT_ID,
@@ -28,14 +25,9 @@ const {
   SF_QUEUE_NAME = 'Admin Queue',
 } = process.env;
 
-// In-Memory Connection & Queue Metadata Cache
 let cachedConn = null;
 let cachedQueue = null;
 
-/**
- * In-Memory Response Cache (5-Minute TTL)
- * Prevents exhausting daily Salesforce API call limits and eliminates gateway timeouts
- */
 const responseCache = {
   store: new Map(),
   get(key) {
@@ -55,12 +47,9 @@ const responseCache = {
   },
   delete(key) {
     this.store.delete(key);
-  }
+  },
 };
 
-/**
- * Helper: Establish or reuse an authenticated Salesforce session
- */
 async function getSalesforceConnection(forceRefresh = false) {
   if (!SF_CLIENT_ID || !SF_CLIENT_SECRET) {
     throw new Error('Missing SF_CLIENT_ID or SF_CLIENT_SECRET in .env file.');
@@ -100,9 +89,6 @@ async function getSalesforceConnection(forceRefresh = false) {
   return cachedConn;
 }
 
-/**
- * Helper: Resolve and cache queue metadata dynamically via Group object
- */
 async function getQueueMetadata(conn, targetName) {
   if (cachedQueue && cachedQueue.Name === targetName) {
     return cachedQueue;
@@ -127,56 +113,166 @@ async function getQueueMetadata(conn, targetName) {
   return cachedQueue;
 }
 
+async function getQueueMembers(conn, queueId) {
+  try {
+    const memberQuery = `
+      SELECT UserOrGroupId 
+      FROM GroupMember 
+      WHERE GroupId = '${queueId}'
+    `;
+    const memberRes = await conn.query(memberQuery);
+    const userIds = memberRes.records
+      .map((r) => r.UserOrGroupId)
+      .filter((id) => id && id.startsWith('005'));
+
+    if (userIds.length === 0) return [];
+
+    const userQuery = `
+      SELECT Id, Name 
+      FROM User 
+      WHERE Id IN (${userIds.map((id) => `'${id}'`).join(',')})
+      AND IsActive = true
+    `;
+    const userRes = await conn.query(userQuery);
+    return userRes.records.map((u) => u.Name);
+  } catch (err) {
+    console.warn(`[WARNING] Could not fetch GroupMember: ${err.message}`);
+    return [];
+  }
+}
+
+function normalizeType(rawType) {
+  if (!rawType) return 'Incident';
+  const t = String(rawType).toLowerCase().trim();
+  if (t.includes('service') || t.includes('request') || t === 'sr') return 'Service Request';
+  if (t.includes('query') || t.includes('question') || t.includes('inquiry')) return 'Query';
+  if (t.includes('feature') || t.includes('enhancement') || t.includes('cr')) return 'Feature Request';
+  if (t.includes('incident') || t.includes('issue') || t.includes('bug')) return 'Incident';
+  return rawType;
+}
+
+function generateMonthlyWeekBuckets(year, monthIndex) {
+  const monthNames = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  const lastDayOfMonth = new Date(year, monthIndex + 1, 0).getDate();
+  const buckets = [];
+
+  let currentStartDay = 1;
+  let weekIndex = 1;
+
+  while (currentStartDay <= lastDayOfMonth) {
+    const startDate = new Date(year, monthIndex, currentStartDay);
+    const dayOfWeek = startDate.getDay();
+
+    const daysToSunday = (7 - dayOfWeek) % 7;
+    const currentEndDay = Math.min(currentStartDay + daysToSunday, lastDayOfMonth);
+
+    const label = `${monthNames[monthIndex]} ${String(currentStartDay).padStart(2, '0')} - ${monthNames[monthIndex]} ${String(currentEndDay).padStart(2, '0')}`;
+
+    buckets.push({
+      week: `Week ${weekIndex}`,
+      label,
+      startDay: currentStartDay,
+      endDay: currentEndDay,
+      totalInflow: 0,
+      typeBreakdown: { Incident: 0, 'Service Request': 0, Query: 0, 'Feature Request': 0 },
+      agentBreakdown: {},
+    });
+
+    currentStartDay = currentEndDay + 1;
+    weekIndex++;
+  }
+
+  return buckets;
+}
+
+function bifurcateRecordsByWeek(records, year, monthIndex) {
+  const monthNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  const weeks = generateMonthlyWeekBuckets(year, monthIndex);
+  let monthTotal = 0;
+
+  records.forEach((c) => {
+    const d = new Date(c.CreatedDate);
+    const day = d.getDate();
+
+    const targetWeek = weeks.find((w) => day >= w.startDay && day <= w.endDay);
+    if (targetWeek) {
+      targetWeek.totalInflow++;
+      monthTotal++;
+
+      const type = normalizeType(c.Type);
+      targetWeek.typeBreakdown[type] = (targetWeek.typeBreakdown[type] || 0) + 1;
+
+      const agent = c.agent || 'Unassigned';
+      if (agent !== 'Unassigned') {
+        if (!targetWeek.agentBreakdown[agent]) {
+          targetWeek.agentBreakdown[agent] = {
+            Incident: 0,
+            'Service Request': 0,
+            Query: 0,
+            'Feature Request': 0,
+            total: 0,
+          };
+        }
+        targetWeek.agentBreakdown[agent][type] = (targetWeek.agentBreakdown[agent][type] || 0) + 1;
+        targetWeek.agentBreakdown[agent].total += 1;
+      }
+    }
+  });
+
+  const cleanedWeeks = weeks.map(({ startDay, endDay, ...rest }) => rest);
+
+  return {
+    month: `${monthNames[monthIndex]} ${year}`,
+    totalInflow: monthTotal,
+    weeks: cleanedWeeks,
+  };
+}
+
 /**
  * GET /api/queue-inflow
- * Fetches tickets that entered or are currently sitting in the queue
  */
 app.get('/api/queue-inflow', async (req, res) => {
   const queueName = req.query.queueName || SF_QUEUE_NAME;
-  const rangeParam = req.query.range || 'rolling30';
+  const rangeParam = req.query.range || 'thisMonth';
   const forceRefresh = req.query.refresh === 'true';
   const cacheKey = `${queueName}_${rangeParam}`;
 
-  // 1. Serve from in-memory cache if available and not explicitly refreshing
   if (!forceRefresh) {
     const cachedData = responseCache.get(cacheKey);
     if (cachedData) {
-      console.log(`[CACHE HIT] Returning cached payload for ${cacheKey}`);
       return res.json({ ...cachedData, cached: true });
     }
   }
 
-  const allowedRanges = {
-    thisMonth: 'THIS_MONTH',
-    rolling30: 'LAST_N_DAYS:30',
-    lastMonth: 'LAST_MONTH',
-  };
-  const sfDateFilter = allowedRanges[rangeParam] || 'LAST_N_DAYS:30';
-
-  // Inner fetch logic with automatic session retry
   const fetchInflowData = async (isRetry = false) => {
     try {
       const conn = await getSalesforceConnection(isRetry);
       const queue = await getQueueMetadata(conn, queueName);
 
       console.log(`\n======================================================`);
-      console.log(`Fetching Inflow for: "${queue.Name}" (${rangeParam} -> ${sfDateFilter})`);
+      console.log(`Fetching Inflow (${rangeParam}) for: "${queue.Name}"`);
       console.log(`======================================================`);
 
-      // 1. Fetch tickets currently in the queue
+      const directQueueMembers = await getQueueMembers(conn, queue.Id);
+
       const currentQueueSoql = `
-        SELECT Id, CaseNumber, Subject, Status, Automation_Priority__c, Type, CreatedDate 
+        SELECT Id, CaseNumber, Subject, Status, Automation_Priority__c, Type, CreatedDate, OwnerId, Owner.Name 
         FROM Case 
         WHERE OwnerId = '${queue.Id}' 
         ORDER BY CreatedDate ASC
       `;
 
-      // 2. Fetch ownership history events (strictly Field = 'Owner' to bypass noise)
       const historySoql = `
         SELECT CaseId, Field, OldValue, NewValue, CreatedDate 
         FROM CaseHistory 
         WHERE Field = 'Owner' 
-        AND CreatedDate = ${sfDateFilter} 
+        AND (CreatedDate = THIS_MONTH OR CreatedDate = LAST_MONTH) 
         ORDER BY CreatedDate DESC
       `;
 
@@ -194,26 +290,24 @@ app.get('/api/queue-inflow', async (req, res) => {
         })(),
       ]);
 
-      console.log(`[DEBUG] Cases currently waiting in Admin Queue: ${currentResult.records.length}`);
-      console.log(`[DEBUG] Total genuine Owner change events in timeframe: ${historyRecords.length}`);
-
       const caseMap = new Map();
       const caseInflowTimestamps = new Map();
+      const caseAgentMap = new Map();
+      const detectedHistoricalAgents = new Set(directQueueMembers);
 
-      // Register cases currently inside the queue
       currentResult.records.forEach((c) => {
         caseMap.set(c.Id, {
           Id: c.Id,
           CaseNumber: c.CaseNumber,
           Subject: c.Subject || '(No Subject)',
+          agent: 'Unassigned',
           Status: c.Status,
           Automation_Priority__c: c.Automation_Priority__c || 'Medium',
-          Type: c.Type || 'Incident',
+          Type: normalizeType(c.Type),
           CreatedDate: c.CreatedDate,
         });
       });
 
-      // Target matching logic
       const qNameLower = queue.Name.toLowerCase().trim();
       const qDevLower = queue.DeveloperName.toLowerCase().trim();
       const q15Id = queue.Id.substring(0, 15).toLowerCase();
@@ -235,34 +329,43 @@ app.get('/api/queue-inflow', async (req, res) => {
           if (movedIn && !caseInflowTimestamps.has(h.CaseId)) {
             caseInflowTimestamps.set(h.CaseId, h.CreatedDate);
           }
+          if (movedOut && !isTargetQueue(h.NewValue) && h.NewValue && h.NewValue !== 'Automated Process') {
+            caseAgentMap.set(h.CaseId, h.NewValue);
+            detectedHistoricalAgents.add(h.NewValue);
+          }
         }
       });
 
-      console.log(`[DEBUG] Cases identified that passed through "${queue.Name}": ${targetCaseIds.size}`);
-
-      // Query full Case details for tickets that were reassigned or closed
       const missingCaseIds = Array.from(targetCaseIds).filter((id) => !caseMap.has(id));
 
       if (missingCaseIds.length > 0) {
-        console.log(`[DEBUG] Querying details for ${missingCaseIds.length} reassigned/closed cases...`);
         const chunkSize = 200;
         for (let i = 0; i < missingCaseIds.length; i += chunkSize) {
           const chunk = missingCaseIds.slice(i, i + chunkSize);
           const idsFormatted = chunk.map((id) => `'${id}'`).join(',');
           const query = `
-            SELECT Id, CaseNumber, Subject, Status, Automation_Priority__c, Type, CreatedDate 
+            SELECT Id, CaseNumber, Subject, Status, Automation_Priority__c, Type, CreatedDate, OwnerId, Owner.Name 
             FROM Case 
             WHERE Id IN (${idsFormatted})
           `;
           const res = await conn.query(query);
           res.records.forEach((c) => {
+            const ownerName = c.Owner && c.Owner.Name ? c.Owner.Name : null;
+            const agentName =
+              ownerName && !isTargetQueue(ownerName) && ownerName !== 'Automated Process'
+                ? ownerName
+                : caseAgentMap.get(c.Id) || 'Unassigned';
+
+            if (agentName !== 'Unassigned') detectedHistoricalAgents.add(agentName);
+
             caseMap.set(c.Id, {
               Id: c.Id,
               CaseNumber: c.CaseNumber,
               Subject: c.Subject || '(No Subject)',
+              agent: agentName,
               Status: c.Status,
               Automation_Priority__c: c.Automation_Priority__c || 'Medium',
-              Type: c.Type || 'Incident',
+              Type: normalizeType(c.Type),
               CreatedDate: caseInflowTimestamps.get(c.Id) || c.CreatedDate,
             });
           });
@@ -270,23 +373,97 @@ app.get('/api/queue-inflow', async (req, res) => {
       }
 
       const unifiedRecords = Array.from(caseMap.values());
-      console.log(`[SUCCESS] Total unified inflow tickets for dashboard: ${unifiedRecords.length}\n`);
+      const resolvedQueueAgents = Array.from(detectedHistoricalAgents).filter(
+        (name) => name && !isTargetQueue(name) && name !== 'Automated Process' && name !== 'System'
+      );
+
+      // Monthly partitioning for weekly bifurcation
+      const now = new Date();
+      const currentYear = now.getFullYear();
+      const currentMonth = now.getMonth();
+
+      const lastMonthDate = new Date(currentYear, currentMonth - 1, 1);
+      const lastYear = lastMonthDate.getFullYear();
+      const lastMonth = lastMonthDate.getMonth();
+
+      const thisMonthRecords = [];
+      const lastMonthRecords = [];
+
+      unifiedRecords.forEach((c) => {
+        const d = new Date(c.CreatedDate);
+        const y = d.getFullYear();
+        const m = d.getMonth();
+
+        if (y === currentYear && m === currentMonth) {
+          thisMonthRecords.push(c);
+        } else if (y === lastYear && m === lastMonth) {
+          lastMonthRecords.push(c);
+        }
+      });
+
+      const currentMonthBifurcation = bifurcateRecordsByWeek(thisMonthRecords, currentYear, currentMonth);
+      const lastMonthBifurcation = bifurcateRecordsByWeek(lastMonthRecords, lastYear, lastMonth);
+
+      // Precise Timeframe Filter for requested rangeParam
+      let displayRecords = unifiedRecords;
+
+      if (rangeParam === 'thisMonth') {
+        displayRecords = thisMonthRecords;
+      } else if (rangeParam === 'lastMonth') {
+        displayRecords = lastMonthRecords;
+      } else if (rangeParam === 'bothMonths') {
+        displayRecords = unifiedRecords;
+      } else if (rangeParam === 'rolling30') {
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(now.getDate() - 30);
+        displayRecords = unifiedRecords.filter((c) => new Date(c.CreatedDate) >= thirtyDaysAgo);
+      } else if (rangeParam === 'pastWeek1') {
+        const dStart = new Date(); dStart.setDate(now.getDate() - 7);
+        displayRecords = unifiedRecords.filter((c) => new Date(c.CreatedDate) >= dStart);
+      } else if (rangeParam === 'pastWeek2') {
+        const dEnd = new Date(); dEnd.setDate(now.getDate() - 7);
+        const dStart = new Date(); dStart.setDate(now.getDate() - 14);
+        displayRecords = unifiedRecords.filter((c) => {
+          const cd = new Date(c.CreatedDate);
+          return cd >= dStart && cd < dEnd;
+        });
+      } else if (rangeParam === 'pastWeek3') {
+        const dEnd = new Date(); dEnd.setDate(now.getDate() - 14);
+        const dStart = new Date(); dStart.setDate(now.getDate() - 21);
+        displayRecords = unifiedRecords.filter((c) => {
+          const cd = new Date(c.CreatedDate);
+          return cd >= dStart && cd < dEnd;
+        });
+      } else if (rangeParam === 'pastWeek4') {
+        const dEnd = new Date(); dEnd.setDate(now.getDate() - 21);
+        const dStart = new Date(); dStart.setDate(now.getDate() - 28);
+        displayRecords = unifiedRecords.filter((c) => {
+          const cd = new Date(c.CreatedDate);
+          return cd >= dStart && cd < dEnd;
+        });
+      }
 
       const payload = {
         success: true,
         queueName: queue.Name,
         queueId: queue.Id,
         range: rangeParam,
-        totalSize: unifiedRecords.length,
-        records: unifiedRecords,
+        queueAgents: resolvedQueueAgents,
+        totalSize: displayRecords.length,
+        records: displayRecords,
+        weeklyBifurcation: {
+          currentMonth: currentMonthBifurcation,
+          lastMonth: lastMonthBifurcation,
+          allWeeks: [
+            ...lastMonthBifurcation.weeks.map((w) => ({ ...w, month: lastMonthBifurcation.month })),
+            ...currentMonthBifurcation.weeks.map((w) => ({ ...w, month: currentMonthBifurcation.month })),
+          ],
+        },
       };
 
-      // Cache successful response for 5 minutes (300 seconds)
       responseCache.set(cacheKey, payload, 300);
-
       return res.json({ ...payload, cached: false });
     } catch (err) {
-      // Auto-retry once if session expired
       if ((err.errorCode === 'INVALID_SESSION_ID' || err.message.includes('Session expired')) && !isRetry) {
         console.warn('Session expired. Invalidating connection and retrying request...');
         cachedConn = null;
@@ -305,10 +482,6 @@ app.get('/api/queue-inflow', async (req, res) => {
   }
 });
 
-/**
- * GET /api/health
- * Simple status and Salesforce connectivity check
- */
 app.get('/api/health', async (req, res) => {
   try {
     const conn = await getSalesforceConnection();
@@ -330,6 +503,5 @@ app.listen(PORT, HOST, () => {
   console.log(`Server listening on all interfaces at port ${PORT}`);
   console.log(`Local VM access:  http://localhost:${PORT}`);
   console.log(`Remote access:    http://172.35.0.13:${PORT}`);
-  console.log(`Health endpoint:  http://172.35.0.13:${PORT}/api/health`);
   console.log(`=========================================`);
 });

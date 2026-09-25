@@ -41,9 +41,20 @@
       <div class="toolbar-info">
         <label for="timeRangeSelect" class="label-badge">Timeframe:</label>
         <select id="timeRangeSelect" class="table-filter" style="margin: 0 10px; font-weight: 600;">
-          <option value="rolling30" selected>Rolling 30 Days</option>
-          <option value="thisMonth">This Month (Current)</option>
-          <option value="lastMonth">Last Calendar Month</option>
+          <optgroup label="Calendar Periods">
+            <option value="thisMonth" selected>Current Month</option>
+            <option value="lastMonth">Last Calendar Month</option>
+            <option value="bothMonths">Last & Current Months</option>
+          </optgroup>
+          <optgroup label="Rolling Periods">
+            <option value="rolling30">Rolling 30 Days</option>
+          </optgroup>
+          <optgroup label="Past 4 Weeks (Individual)">
+            <option value="pastWeek1">Past Week 1 (Days 1–7 ago)</option>
+            <option value="pastWeek2">Past Week 2 (Days 8–14 ago)</option>
+            <option value="pastWeek3">Past Week 3 (Days 15–21 ago)</option>
+            <option value="pastWeek4">Past Week 4 (Days 22–28 ago)</option>
+          </optgroup>
         </select>
         <span class="window-range" id="dateRangeText">Loading timeframe...</span>
       </div>
@@ -52,7 +63,7 @@
         <button class="btn btn-sm btn-outline" onclick="document.getElementById('csvFileInput').click()">
           Upload Salesforce CSV/JSON
         </button>
-        <button class="btn btn-sm btn-outline" id="exportCsvBtn">Export Report CSV</button>
+        <button class="btn btn-sm btn-outline" id="exportCsvBtn">Export Active Backlog CSV</button>
       </div>
     </div>
 
@@ -83,16 +94,16 @@
           <span class="kpi-icon">📥</span>
         </div>
         <div class="kpi-value" id="kpiTotalInflow">0</div>
-        <div class="kpi-subtext positive" id="kpiGrowth">▲ +14.2% vs previous period</div>
+        <div class="kpi-subtext positive" id="kpiGrowth">▲ Total Routed Intake</div>
       </div>
 
       <div class="kpi-card">
         <div class="kpi-header">
-          <span class="kpi-title">DAILY AVERAGE</span>
+          <span class="kpi-title">DAILY WORKDAY AVERAGE</span>
           <span class="kpi-icon">📊</span>
         </div>
         <div class="kpi-value" id="kpiDailyAvg">0</div>
-        <div class="kpi-subtext" id="kpiAvgSplit">Weekday avg: ~0 / day</div>
+        <div class="kpi-subtext" id="kpiAvgSplit">5-day work week (Sat & Sun off)</div>
       </div>
 
       <div class="kpi-card">
@@ -106,15 +117,15 @@
 
       <div class="kpi-card">
         <div class="kpi-header">
-          <span class="kpi-title">MEDIAN WAIT IN QUEUE</span>
-          <span class="kpi-icon">⏱</span>
+          <span class="kpi-title">AGING CASES (> 24H)</span>
+          <span class="kpi-icon">⚠️</span>
         </div>
-        <div class="kpi-value" id="kpiWaitTime">24m</div>
-        <div class="kpi-subtext" id="kpiSlaStatus">94.8% First-Touch SLA Met</div>
+        <div class="kpi-value" id="kpiAgingCases" style="color: #ea001e;">0</div>
+        <div class="kpi-subtext warning" id="kpiAgingSubtext">New / Assigned > 24h</div>
       </div>
     </section>
 
-    <!-- Analytics Charts Grid -->
+    <!-- Analytics Charts & Tables Grid -->
     <section class="charts-grid">
       <!-- Main Daily Inflow Chart -->
       <div class="chart-card card-span-2">
@@ -135,16 +146,16 @@
         </div>
       </div>
 
-      <!-- Channel Breakdown Donut -->
+      <!-- Clickable Case Status Breakdown Donut -->
       <div class="chart-card">
         <div class="card-header">
           <div>
-            <h3 class="card-title">Intake Origin Breakdown</h3>
-            <p class="card-subtitle">Channel entry distribution</p>
+            <h3 class="card-title">Case Status Breakdown</h3>
+            <p class="card-subtitle">Click a slice to filter the list below</p>
           </div>
         </div>
         <div class="canvas-container">
-          <canvas id="originChart"></canvas>
+          <canvas id="statusChart"></canvas>
         </div>
       </div>
 
@@ -161,26 +172,50 @@
         </div>
       </div>
 
-      <!-- Priority Distribution Bar -->
+      <!-- Weekly Agent Workload Table -->
       <div class="chart-card card-span-2">
         <div class="card-header">
           <div>
-            <h3 class="card-title">Inflow by Priority Tier</h3>
-            <p class="card-subtitle">Critical P1 through Low P4 tickets</p>
+            <h3 class="card-title">Weekly Agent Workload by Ticket Type</h3>
+            <p class="card-subtitle">Cases worked across the 4 queue agents categorized by type</p>
+          </div>
+          <div class="chart-controls">
+            <label for="agentWeekSelect" class="label-badge" style="margin-right: 6px;">Select Week:</label>
+            <select id="agentWeekSelect" class="table-filter" style="font-weight: 600;">
+              <option value="CURRENT_WEEK" selected>Current Week</option>
+              <option value="ALL_WEEKS">All Weeks (Combined)</option>
+            </select>
           </div>
         </div>
-        <div class="canvas-container">
-          <canvas id="priorityChart"></canvas>
+        <div class="table-responsive" style="margin-top: 12px;">
+          <table class="slds-table">
+            <thead>
+              <tr>
+                <th style="width: 25%;">Queue Agent</th>
+                <th style="text-align: center;">Incident</th>
+                <th style="text-align: center;">Service Request</th>
+                <th style="text-align: center;">Query</th>
+                <th style="text-align: center;">Feature Request</th>
+                <th style="text-align: center; font-weight: 700;">Total Handled</th>
+              </tr>
+            </thead>
+            <tbody id="agentWorkloadTableBody">
+              <!-- Populated dynamically by app.js -->
+            </tbody>
+            <tfoot id="agentWorkloadTableFoot" style="font-weight: 700; background: #f8f9fa;">
+              <!-- Populated dynamically by app.js -->
+            </tfoot>
+          </table>
         </div>
       </div>
     </section>
 
-    <!-- Case Detail Table -->
+    <!-- Case Detail Table (Filtered Dynamically) -->
     <section class="table-section">
       <div class="table-card">
         <div class="table-toolbar">
           <div class="table-search-group">
-            <input type="text" id="searchInput" placeholder="Search Case #, Subject, Account..." class="table-search" />
+            <input type="text" id="searchInput" placeholder="Search Case #, Subject, Agent..." class="table-search" />
             <select id="priorityFilter" class="table-filter">
               <option value="ALL">All Priorities</option>
               <option value="Critical">Critical</option>
@@ -196,7 +231,14 @@
               <option value="Phone">Phone</option>
             </select>
           </div>
-          <div class="record-count" id="recordCountText">Showing 0 cases</div>
+
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div id="statusFilterIndicator" style="display: none; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: #0176D3; background: #eef4ff; padding: 4px 10px; border-radius: 12px;">
+              <span>Status: <strong id="activeStatusLabel">None</strong></span>
+              <button id="clearStatusFilterBtn" style="border: none; background: none; color: #ea001e; font-size: 16px; cursor: pointer; line-height: 1;">&times;</button>
+            </div>
+            <div class="record-count" id="recordCountText">Showing 0 active cases</div>
+          </div>
         </div>
 
         <div class="table-responsive">
@@ -205,10 +247,11 @@
               <tr>
                 <th>Case Number</th>
                 <th>Subject</th>
+                <th>Assigned Agent</th>
                 <th>Type</th>
                 <th>Priority</th>
                 <th>Origin</th>
-                <th>Routed Timestamp</th>
+                <th>Age / Routed</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -220,40 +263,6 @@
       </div>
     </section>
   </main>
-
-  <!-- Settings & SOQL Helper Modal -->
-  <div class="modal-backdrop" id="settingsModal">
-    <div class="modal-window">
-      <div class="modal-header">
-        <h2>Salesforce Queue Configuration & SOQL</h2>
-        <button class="close-btn" id="closeSettingsBtn">&times;</button>
-      </div>
-      <div class="modal-body">
-        <label class="form-label" for="queueNameInput">Queue Name</label>
-        <input type="text" id="queueNameInput" class="form-input" value="Admin Queue" />
-
-        <label class="form-label" for="queueIdInput">Queue Group ID (00G prefix)</label>
-        <input type="text" id="queueIdInput" class="form-input" value="00GOX000004wIAL2A2" />
-
-        <h4 class="modal-subheading">1. Standard Inflow Query (Created into Queue)</h4>
-        <pre class="soql-code"><code id="soqlStandard">SELECT Id, CaseNumber, Subject, Status, Automation_Priority__c, Type, CreatedDate 
-FROM Case 
-WHERE Owner.Name = 'Admin Queue' 
-AND CreatedDate = LAST_N_DAYS:30 
-ORDER BY CreatedDate ASC</code></pre>
-
-        <h4 class="modal-subheading">2. Case History Query (Reassigned / Picked Out of Queue)</h4>
-        <pre class="soql-code"><code id="soqlHistory">SELECT CaseId, Field, OldValue, NewValue, CreatedDate 
-FROM CaseHistory 
-WHERE Field = 'Owner' 
-AND CreatedDate = LAST_N_DAYS:30 
-ORDER BY CreatedDate DESC</code></pre>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-primary" id="saveSettingsBtn">Save Changes</button>
-      </div>
-    </div>
-  </div>
 
   <script src="app.js"></script>
 </body>
