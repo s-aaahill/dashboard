@@ -187,16 +187,6 @@ function mapIncomingRecords(raw) {
     };
   });
 
-  if (!state.queueAgents || state.queueAgents.length === 0) {
-    const detected = new Set();
-    state.cases.forEach((c) => {
-      if (c.agent && c.agent !== "Unassigned" && c.agent !== "Admin Queue") {
-        detected.add(c.agent);
-      }
-    });
-    state.queueAgents = Array.from(detected);
-  }
-
   updateTabBadges();
   applyFilters();
 }
@@ -651,16 +641,6 @@ function renderAgentWorkloadTable() {
   tbody.innerHTML = "";
   tfoot.innerHTML = "";
 
-  let agentList = state.queueAgents && state.queueAgents.length > 0 ? [...state.queueAgents] : [];
-  if (agentList.length === 0) {
-    const detected = new Set();
-    state.cases.forEach((c) => {
-      if (c.agent && c.agent !== "Unassigned" && c.agent !== "Admin Queue") detected.add(c.agent);
-    });
-    agentList = Array.from(detected);
-  }
-  agentList = agentList.slice(0, 4);
-
   const now = new Date();
 
   const weekCases = state.filteredCases.filter((c) => {
@@ -676,11 +656,14 @@ function renderAgentWorkloadTable() {
     }
   });
 
+  // Only current queue members are listed
+  const agentList = state.queueAgents || [];
+
   const types = ["Incident", "Service Request", "Query", "Feature Request"];
   const colTotals = { Incident: 0, "Service Request": 0, Query: 0, "Feature Request": 0, Total: 0 };
 
   if (agentList.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #888; padding: 15px;">No active agents found in queue history.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: #888; padding: 15px;">No queue members found.</td></tr>`;
     return;
   }
 

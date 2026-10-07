@@ -491,9 +491,8 @@ async function executeInflowFetch(queueName, rangeParam, isRetry = false) {
     }
 
     const unifiedRecords = Array.from(caseMap.values());
-    const resolvedQueueAgents = Array.from(detectedHistoricalAgents).filter(
-      (name) => name && !isTargetQueue(name) && name !== 'Automated Process' && name !== 'System'
-    );
+    // Only actual queue members are reported; historical owners are not part of the roster
+    const resolvedQueueAgents = directQueueMembers.filter((name) => name && !isTargetQueue(name));
 
     // Timezone-Aware Partitioning against Org Now (IST)
     const nowOrg = getOrgDateParts(new Date());
