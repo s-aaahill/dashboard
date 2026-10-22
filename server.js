@@ -42,6 +42,8 @@ const responseCache = {
     return entry.data;
   },
   set(key, data, ttlSeconds = 120) {
+    // Custom ranges create new keys; cap the cache so it cannot grow forever
+    if (this.store.size >= 50) this.store.delete(this.store.keys().next().value);
     this.store.set(key, {
       data,
       expiresAt: Date.now() + ttlSeconds * 1000,
@@ -329,10 +331,48 @@ async function poolAll(tasks, limit = 5) {
   return Promise.all(results);
 }
 
-// Ranges other than the two calendar months all derive from the same 2-month dataset,
-// so they share one Salesforce fetch/cache entry instead of each paying for their own.
+// ---------------------------------------------------------------------------
+// Range handling
+// ---------------------------------------------------------------------------
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_CUSTOM_DAYS = 365;
+
+// Midnight of a YYYY-MM-DD day in the org timezone (IST)
+function parseDay(s) {
+  if (typeof s !== 'string' || !ISO_DAY.test(s)) return null;
+  const d = new Date(`${s}T00:00:00+05:30`);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Ranges other than the two calendar months derive from the same 2-month dataset,
+// so they share one Salesforce fetch/cache entry. Custom ranges that reach further
+// back get their own scope ("custom:START:END").
 function scopeForRange(rangeParam) {
-  return rangeParam === 'thisMonth' || rangeParam === 'lastMonth' ? rangeParam : 'bothMonths';
+  if (rangeParam === 'thisMonth' || rangeParam === 'lastMonth') return rangeParam;
+  if (typeof rangeParam === 'string' && rangeParam.startsWith('custom:')) return rangeParam;
+  return 'bothMonths';
+}
+
+// Turns query params into { range, scope, from, to }
+function resolveRange(query) {
+  const range = query.range || 'thisMonth';
+  if (range !== 'custom') return { range, scope: scopeForRange(range) };
+
+  const from = parseDay(query.start);
+  const endDay = parseDay(query.end);
+  if (!from || !endDay) throw new Error('Custom range needs valid start and end dates (YYYY-MM-DD).');
+  if (endDay < from) throw new Error('Start date must be on or before the end date.');
+
+  const to = new Date(endDay.getTime() + 24 * 60 * 60 * 1000); // exclusive end
+  if ((to - from) / 86400000 > MAX_CUSTOM_DAYS) {
+    throw new Error(`Custom range cannot exceed ${MAX_CUSTOM_DAYS} days.`);
+  }
+
+  // Inside the already-fetched two-month dataset? Reuse it.
+  const org = getOrgDateParts(new Date());
+  const twoMonthStart = new Date(org.year, org.monthIndex - 1, 1); // process TZ is IST
+  const scope = from >= twoMonthStart ? 'bothMonths' : `custom:${query.start}:${query.end}`;
+  return { range, scope, from, to };
 }
 
 async function executeInflowFetch(queueName, rangeParam, isRetry = false) {
@@ -363,18 +403,24 @@ async function executeInflowFetch(queueName, rangeParam, isRetry = false) {
 
     const historyQueries = [];
     const scope = scopeForRange(rangeParam);
-    if (scope === 'lastMonth') {
+    const customMatch = /^custom:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/.exec(scope);
+    const historySelect = `SELECT CaseId, Field, OldValue, NewValue, CreatedDate FROM CaseHistory WHERE Field = 'Owner'`;
+
+    if (customMatch) {
+      const soqlDate = (d) => d.toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const from = parseDay(customMatch[1]);
+      const to = new Date(parseDay(customMatch[2]).getTime() + 24 * 60 * 60 * 1000);
       historyQueries.push(
-        `SELECT CaseId, Field, OldValue, NewValue, CreatedDate FROM CaseHistory WHERE Field = 'Owner' AND CreatedDate = LAST_MONTH ORDER BY CreatedDate DESC`
+        `${historySelect} AND CreatedDate >= ${soqlDate(from)} AND CreatedDate < ${soqlDate(to)} ORDER BY CreatedDate DESC`
       );
+    } else if (scope === 'lastMonth') {
+      historyQueries.push(`${historySelect} AND CreatedDate = LAST_MONTH ORDER BY CreatedDate DESC`);
     } else if (scope === 'thisMonth') {
-      historyQueries.push(
-        `SELECT CaseId, Field, OldValue, NewValue, CreatedDate FROM CaseHistory WHERE Field = 'Owner' AND CreatedDate = THIS_MONTH ORDER BY CreatedDate DESC`
-      );
+      historyQueries.push(`${historySelect} AND CreatedDate = THIS_MONTH ORDER BY CreatedDate DESC`);
     } else {
       historyQueries.push(
-        `SELECT CaseId, Field, OldValue, NewValue, CreatedDate FROM CaseHistory WHERE Field = 'Owner' AND CreatedDate = THIS_MONTH ORDER BY CreatedDate DESC`,
-        `SELECT CaseId, Field, OldValue, NewValue, CreatedDate FROM CaseHistory WHERE Field = 'Owner' AND CreatedDate = LAST_MONTH ORDER BY CreatedDate DESC`
+        `${historySelect} AND CreatedDate = THIS_MONTH ORDER BY CreatedDate DESC`,
+        `${historySelect} AND CreatedDate = LAST_MONTH ORDER BY CreatedDate DESC`
       );
     }
 
@@ -545,7 +591,7 @@ async function executeInflowFetch(queueName, rangeParam, isRetry = false) {
       lastMonth
     );
 
-    // Base records for this scope; rolling/past-week narrowing happens in applyRangeFilter()
+    // Base records for this scope; rolling/past-week/custom narrowing happens in applyRangeFilter()
     const displayRecords =
       scope === 'thisMonth' ? thisMonthRecords : scope === 'lastMonth' ? lastMonthRecords : unifiedRecords;
 
@@ -553,6 +599,7 @@ async function executeInflowFetch(queueName, rangeParam, isRetry = false) {
       success: true,
       queueName: queue.Name,
       queueId: queue.Id,
+      instanceUrl: conn.instanceUrl,
       range: scope,
       queueAgents: resolvedQueueAgents,
       totalSize: displayRecords.length,
@@ -579,11 +626,14 @@ async function executeInflowFetch(queueName, rangeParam, isRetry = false) {
   }
 }
 
-function applyRangeFilter(payload, rangeParam) {
-  const weekMatch = /^pastWeek(\d+)$/.exec(rangeParam);
+function applyRangeFilter(payload, spec) {
+  const weekMatch = /^pastWeek(\d+)$/.exec(spec.range);
   let from = null;
   let to = null;
-  if (rangeParam === 'rolling30') {
+  if (spec.range === 'custom') {
+    from = spec.from;
+    to = spec.to;
+  } else if (spec.range === 'rolling30') {
     from = new Date();
     from.setDate(from.getDate() - 30);
   } else if (weekMatch) {
@@ -595,44 +645,50 @@ function applyRangeFilter(payload, rangeParam) {
   } else {
     return payload;
   }
+  const isCurrentWeekWindow = weekMatch && weekMatch[1] === '1';
   const records = payload.records.filter((c) => {
     const cd = new Date(c.CreatedDate);
-    return cd >= from && (!to || weekMatch[1] === '1' || cd < to);
+    return cd >= from && (!to || isCurrentWeekWindow || cd < to);
   });
-  return { ...payload, range: rangeParam, totalSize: records.length, records };
+  return { ...payload, range: spec.range, totalSize: records.length, records };
 }
 
-async function fetchInflowData(queueName = SF_QUEUE_NAME, rangeParam = 'thisMonth', forceRefresh = false) {
-  const scope = scopeForRange(rangeParam);
-  const cacheKey = `${queueName}_${scope}`;
+async function fetchInflowData(queueName = SF_QUEUE_NAME, spec = resolveRange({}), forceRefresh = false) {
+  const cacheKey = `${queueName}_${spec.scope}`;
 
   if (!forceRefresh) {
     const cached = responseCache.get(cacheKey);
-    if (cached) return applyRangeFilter(cached, rangeParam);
+    if (cached) return applyRangeFilter(cached, spec);
   }
 
   if (!inFlightRequests.has(cacheKey)) {
     inFlightRequests.set(
       cacheKey,
-      executeInflowFetch(queueName, scope).finally(() => inFlightRequests.delete(cacheKey))
+      executeInflowFetch(queueName, spec.scope).finally(() => inFlightRequests.delete(cacheKey))
     );
   }
 
-  return applyRangeFilter(await inFlightRequests.get(cacheKey), rangeParam);
+  return applyRangeFilter(await inFlightRequests.get(cacheKey), spec);
 }
 
 app.get('/api/queue-inflow', async (req, res) => {
   const queueName = req.query.queueName || SF_QUEUE_NAME;
-  const rangeParam = req.query.range || 'thisMonth';
   const forceRefresh = req.query.refresh === 'true';
 
+  let spec;
+  try {
+    spec = resolveRange(req.query);
+  } catch (err) {
+    return res.status(400).json({ success: false, error: err.message });
+  }
+
   if (forceRefresh) {
-    responseCache.delete(`${queueName}_${scopeForRange(rangeParam)}`);
+    responseCache.delete(`${queueName}_${spec.scope}`);
   }
 
   try {
-    const payload = await fetchInflowData(queueName, rangeParam, forceRefresh);
-    return res.json({ ...payload, cached: !forceRefresh && responseCache.get(`${queueName}_${scopeForRange(rangeParam)}`) !== null });
+    const payload = await fetchInflowData(queueName, spec, forceRefresh);
+    return res.json(payload);
   } catch (err) {
     console.error('Error handling /api/queue-inflow:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -651,17 +707,11 @@ app.get('/api/health', async (req, res) => {
 async function prewarmCache() {
   console.log('[PRE-WARM] Initializing RAM cache in background...');
   try {
-    const t0 = Date.now();
-    await fetchInflowData(SF_QUEUE_NAME, 'thisMonth');
-    console.log(`[PRE-WARM] "thisMonth" warmed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-
-    const t1 = Date.now();
-    await fetchInflowData(SF_QUEUE_NAME, 'lastMonth');
-    console.log(`[PRE-WARM] "lastMonth" warmed in ${((Date.now() - t1) / 1000).toFixed(1)}s`);
-
-    const t2 = Date.now();
-    await fetchInflowData(SF_QUEUE_NAME, 'bothMonths');
-    console.log(`[PRE-WARM] "bothMonths" warmed in ${((Date.now() - t2) / 1000).toFixed(1)}s`);
+    for (const range of ['thisMonth', 'lastMonth', 'bothMonths']) {
+      const t0 = Date.now();
+      await fetchInflowData(SF_QUEUE_NAME, resolveRange({ range }));
+      console.log(`[PRE-WARM] "${range}" warmed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    }
   } catch (err) {
     console.warn('[PRE-WARM WARNING]', err.message);
   }

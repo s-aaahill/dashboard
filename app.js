@@ -5,6 +5,8 @@
 const state = {
   queueName: "Admin Queue",
   timeRange: "thisMonth",
+  customStart: null, // YYYY-MM-DD, used when timeRange === "custom"
+  customEnd: null,   // YYYY-MM-DD, used when timeRange === "custom"
   selectedTab: "ALL",
   selectedWeek: "CURRENT_WEEK",
   selectedStatusFilter: "ACTIVE", // Default view remains Active (New / Assigned)
@@ -16,7 +18,11 @@ const state = {
   showMovingAverage: true,
   isLiveApiConnected: false,
   loadController: null,
-  weekSyncedRange: null
+  weekSyncedRange: null,
+  instanceUrl: null, // Salesforce org URL, used to link case numbers
+  kpiCases: { total: [], weekday: [], peak: [], aging: [] }, // cases behind each KPI card
+  kpiMeta: {},
+  drill: { title: "", cases: [], search: "", type: "ALL", sortKey: "routedDate", sortDir: "desc", lastFocus: null }
 };
 
 const SF_COLORS = {
@@ -76,6 +82,8 @@ function updateDateRangeLabel() {
     const past30 = new Date();
     past30.setDate(now.getDate() - 30);
     labelElem.textContent = `Window: ${fmt(past30)} — ${fmt(now)}`;
+  } else if (state.timeRange === "custom" && state.customStart && state.customEnd) {
+    labelElem.textContent = `Window: ${fmt(parseLocalDate(state.customStart))} — ${fmt(parseLocalDate(state.customEnd))} (Custom)`;
   } else if (state.timeRange.startsWith("pastWeek")) {
     const weekNum = parseInt(state.timeRange.replace("pastWeek", ""), 10);
     const endDaysAgo = (weekNum - 1) * 7;
@@ -102,7 +110,10 @@ async function loadDashboardData() {
   setLoading(true);
 
   try {
-    const url = `/api/queue-inflow?queueName=${encodeURIComponent(state.queueName)}&range=${state.timeRange}`;
+    let url = `/api/queue-inflow?queueName=${encodeURIComponent(state.queueName)}&range=${state.timeRange}`;
+    if (state.timeRange === "custom") {
+      url += `&start=${state.customStart}&end=${state.customEnd}`;
+    }
     const response = await fetch(url, { signal: controller.signal });
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -111,6 +122,7 @@ async function loadDashboardData() {
     if (data.records && Array.isArray(data.records)) {
       state.weeklyBifurcation = data.weeklyBifurcation || null;
       state.queueAgents = Array.isArray(data.queueAgents) ? data.queueAgents : [];
+      state.instanceUrl = typeof data.instanceUrl === "string" && /^https:\/\//.test(data.instanceUrl) ? data.instanceUrl : null;
       populateWeekSelectOptions();
       mapIncomingRecords(data.records);
       populateStatusFilterOptions();
@@ -224,6 +236,8 @@ function getTimeWindow() {
       return [new Date(now.getFullYear(), now.getMonth() - 1, 1), today];
     case "rolling30":
       return [daysAgo(30), today];
+    case "custom":
+      return [parseLocalDate(state.customStart), parseLocalDate(state.customEnd)];
     default: {
       const weekNum = parseInt(state.timeRange.replace("pastWeek", ""), 10) || 1;
       return [daysAgo(weekNum * 7), daysAgo((weekNum - 1) * 7)];
@@ -340,6 +354,9 @@ function updateKPICards() {
     endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   } else if (state.timeRange === "rolling30") {
     startDate.setDate(now.getDate() - 29);
+  } else if (state.timeRange === "custom" && state.customStart && state.customEnd) {
+    startDate = parseLocalDate(state.customStart);
+    endDate = parseLocalDate(state.customEnd);
   } else if (state.timeRange.startsWith("pastWeek")) {
     const weekNum = parseInt(state.timeRange.replace("pastWeek", ""), 10);
     endDate.setDate(now.getDate() - (weekNum - 1) * 7);
@@ -408,6 +425,15 @@ function updateKPICards() {
   if (agingSub) {
     agingSub.textContent = `${agingCases.length} open cases breaching 24h SLA`;
   }
+
+  // Keep the exact cases behind each card so a click can list them
+  state.kpiCases = {
+    total: state.filteredCases,
+    weekday: weekdayCases,
+    peak: peakCount > 0 ? state.filteredCases.filter((c) => c.dateKey === peakDay) : [],
+    aging: agingCases
+  };
+  state.kpiMeta = { dailyAvg, workdays: businessDaysCount, peakDay, peakCount };
 }
 
 function renderDailyInflowChart() {
@@ -449,6 +475,13 @@ function renderDailyInflowChart() {
       const d = new Date();
       d.setDate(now.getDate() - i);
       dateKeys.push(d.toLocaleDateString("en-US", { month: "short", day: "numeric" }));
+    }
+  } else if (state.timeRange === "custom" && state.customStart && state.customEnd) {
+    const cur = parseLocalDate(state.customStart);
+    const last = parseLocalDate(state.customEnd);
+    while (cur <= last) {
+      dateKeys.push(cur.toLocaleDateString("en-US", { month: "short", day: "numeric" }));
+      cur.setDate(cur.getDate() + 1);
     }
   } else if (state.timeRange.startsWith("pastWeek")) {
     const weekNum = parseInt(state.timeRange.replace("pastWeek", ""), 10);
@@ -633,17 +666,10 @@ function renderHourlyCurveChart() {
   });
 }
 
-function renderAgentWorkloadTable() {
-  const tbody = document.getElementById("agentWorkloadTableBody");
-  const tfoot = document.getElementById("agentWorkloadTableFoot");
-  if (!tbody || !tfoot) return;
-
-  tbody.innerHTML = "";
-  tfoot.innerHTML = "";
-
+// Cases that feed the Weekly Agent Workload table (respects the Select Week dropdown)
+function getAgentScopedCases() {
   const now = new Date();
-
-  const weekCases = state.filteredCases.filter((c) => {
+  return state.filteredCases.filter((c) => {
     if (c.agent === "Unassigned") return false;
 
     if (state.selectedWeek === "CURRENT_WEEK") {
@@ -655,11 +681,28 @@ function renderAgentWorkloadTable() {
       return c.weekLabel === state.selectedWeek;
     }
   });
+}
+
+function renderAgentWorkloadTable() {
+  const tbody = document.getElementById("agentWorkloadTableBody");
+  const tfoot = document.getElementById("agentWorkloadTableFoot");
+  if (!tbody || !tfoot) return;
+
+  tbody.innerHTML = "";
+  tfoot.innerHTML = "";
+
+  const weekCases = getAgentScopedCases();
 
   // Only current queue members are listed
   const agentList = state.queueAgents || [];
 
   const types = ["Incident", "Service Request", "Query", "Feature Request"];
+  const pillClass = {
+    Incident: "pill-low",
+    "Service Request": "pill-medium",
+    Query: "pill-high",
+    "Feature Request": "pill-critical"
+  };
   const colTotals = { Incident: 0, "Service Request": 0, Query: 0, "Feature Request": 0, Total: 0 };
 
   if (agentList.length === 0) {
@@ -679,26 +722,38 @@ function renderAgentWorkloadTable() {
     });
     colTotals.Total += rowTotal;
 
+    const safeAgent = escapeHtml(agent);
+    const typeCell = (t) =>
+      counts[t] > 0
+        ? `<td style="text-align: center;"><button type="button" class="pill ${pillClass[t]} drill-link" data-agent="${safeAgent}" data-type="${t}" title="View ${counts[t]} ${t} case(s) for ${safeAgent}">${counts[t]}</button></td>`
+        : `<td style="text-align: center;">0</td>`;
+
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><strong>${agent}</strong></td>
-      <td style="text-align: center;">${counts["Incident"] > 0 ? `<span class="pill pill-low">${counts["Incident"]}</span>` : "0"}</td>
-      <td style="text-align: center;">${counts["Service Request"] > 0 ? `<span class="pill pill-medium">${counts["Service Request"]}</span>` : "0"}</td>
-      <td style="text-align: center;">${counts["Query"] > 0 ? `<span class="pill pill-high">${counts["Query"]}</span>` : "0"}</td>
-      <td style="text-align: center;">${counts["Feature Request"] > 0 ? `<span class="pill pill-critical">${counts["Feature Request"]}</span>` : "0"}</td>
-      <td style="text-align: center; font-weight: 700;">${rowTotal}</td>
+      <td><button type="button" class="agent-link" data-agent="${safeAgent}" title="View all tickets for ${safeAgent}">${safeAgent}</button></td>
+      ${types.map(typeCell).join("")}
+      <td style="text-align: center; font-weight: 700;">${
+        rowTotal > 0
+          ? `<button type="button" class="drill-link-total" data-agent="${safeAgent}" title="View all ${rowTotal} case(s) for ${safeAgent}">${rowTotal}</button>`
+          : "0"
+      }</td>
     `;
     tbody.appendChild(tr);
   });
 
+  const footCell = (count, type, extraStyle = "") =>
+    count > 0
+      ? `<td style="text-align: center; ${extraStyle}"><button type="button" class="drill-link-total" ${type ? `data-type="${type}"` : ""} title="View ${count} case(s)">${count}</button></td>`
+      : `<td style="text-align: center; ${extraStyle}">0</td>`;
+
   tfoot.innerHTML = `
     <tr>
       <td>Total Assigned</td>
-      <td style="text-align: center;">${colTotals["Incident"]}</td>
-      <td style="text-align: center;">${colTotals["Service Request"]}</td>
-      <td style="text-align: center;">${colTotals["Query"]}</td>
-      <td style="text-align: center;">${colTotals["Feature Request"]}</td>
-      <td style="text-align: center; font-size: 15px;">${colTotals.Total}</td>
+      ${footCell(colTotals["Incident"], "Incident")}
+      ${footCell(colTotals["Service Request"], "Service Request")}
+      ${footCell(colTotals["Query"], "Query")}
+      ${footCell(colTotals["Feature Request"], "Feature Request")}
+      ${footCell(colTotals.Total, "", "font-size: 15px;")}
     </tr>
   `;
 }
@@ -761,22 +816,22 @@ function renderTable() {
 
   displayList.forEach((c) => {
     const tr = document.createElement("tr");
-    const pClass = (c.priority || "medium").toLowerCase();
+    const pClass = String(c.priority || "medium").toLowerCase().replace(/[^a-z0-9_-]/g, "");
     const ageHours = Math.floor((nowMs - c.routedDate.getTime()) / (1000 * 60 * 60));
     const isAgingBreach = ageHours >= 24;
 
     tr.innerHTML = `
-      <td><strong>${c.caseNumber}</strong></td>
-      <td>${c.subject}</td>
-      <td><strong>${c.agent}</strong></td>
-      <td><span class="pill pill-medium">${c.type}</span></td>
-      <td><span class="pill pill-${pClass}">${c.priority}</span></td>
-      <td>${c.origin}</td>
+      <td>${caseNumberHtml(c)}</td>
+      <td>${escapeHtml(c.subject)}</td>
+      <td><strong>${escapeHtml(c.agent)}</strong></td>
+      <td><span class="pill pill-medium">${escapeHtml(c.type)}</span></td>
+      <td><span class="pill pill-${pClass}">${escapeHtml(c.priority)}</span></td>
+      <td>${escapeHtml(c.origin)}</td>
       <td>
         ${c.routedDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })} 
         ${isAgingBreach ? `<span class="pill pill-critical" style="margin-left: 5px;">${ageHours}h</span>` : `<span style="color: #666; font-size: 12px;">(${ageHours}h)</span>`}
       </td>
-      <td><span class="pill ${c.status.toLowerCase() === 'new' ? 'pill-high' : 'pill-medium'}">${c.status}</span></td>
+      <td><span class="pill ${String(c.status).toLowerCase() === 'new' ? 'pill-high' : 'pill-medium'}">${escapeHtml(c.status)}</span></td>
     `;
     tbody.appendChild(tr);
   });
@@ -834,10 +889,51 @@ function setupEventListeners() {
     });
   }
 
+  // ---- Timeframe + custom date range ----
+  const customControls = document.getElementById("customRangeControls");
+  const startInput = document.getElementById("customStartDate");
+  const endInput = document.getElementById("customEndDate");
+  const customError = document.getElementById("customRangeError");
+  const applyCustomBtn = document.getElementById("applyCustomRangeBtn");
+
+  const toISODate = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  if (startInput && endInput) {
+    const today = toISODate(new Date());
+    startInput.max = today;
+    endInput.max = today;
+  }
+
   const timeSelect = document.getElementById("timeRangeSelect");
   if (timeSelect) {
     timeSelect.addEventListener("change", async (e) => {
+      if (e.target.value === "custom") {
+        // Wait for Apply; keep the current data on screen until then
+        if (customControls) customControls.hidden = false;
+        if (startInput) startInput.focus();
+        return;
+      }
+      if (customControls) customControls.hidden = true;
+      if (customError) customError.textContent = "";
       state.timeRange = e.target.value;
+      await loadDashboardData();
+    });
+  }
+
+  if (applyCustomBtn) {
+    applyCustomBtn.addEventListener("click", async () => {
+      const s = startInput.value;
+      const e = endInput.value;
+      customError.textContent = "";
+
+      if (!s || !e) { customError.textContent = "Pick both a start and an end date."; return; }
+      if (s > e) { customError.textContent = "Start date must be on or before the end date."; return; }
+      const days = (parseLocalDate(e) - parseLocalDate(s)) / 86400000 + 1;
+      if (days > 365) { customError.textContent = "Range cannot exceed 365 days."; return; }
+
+      state.timeRange = "custom";
+      state.customStart = s;
+      state.customEnd = e;
       await loadDashboardData();
     });
   }
@@ -874,6 +970,8 @@ function setupEventListeners() {
   if (refreshBtn) {
     refreshBtn.addEventListener("click", () => loadDashboardData());
   }
+
+  setupDrillDownListeners();
 
   const exportBtn = document.getElementById("exportCsvBtn");
   if (exportBtn) exportBtn.addEventListener("click", exportToCSV);
@@ -932,29 +1030,399 @@ function exportToCSV() {
     return s === "new" || s === "assigned";
   });
 
+  const rangeTag =
+    state.timeRange === "custom" ? `${state.customStart}_to_${state.customEnd}` : state.timeRange;
+  downloadCasesCsv(activeCases, `queue_backlog_${slugify(state.selectedTab)}_${rangeTag}.csv`);
+}
+
+/* =========================================================================
+ * Shared helpers
+ * ========================================================================= */
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]
+  ));
+}
+
+function slugify(text) {
+  return String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "cases";
+}
+
+function isOpenStatus(status) {
+  const s = String(status || "").toLowerCase();
+  return s === "new" || s === "assigned";
+}
+
+function formatAge(hours) {
+  if (hours < 48) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+// Case number as a link to the record in Salesforce when we know the org URL
+function caseNumberHtml(c) {
+  const label = escapeHtml(c.caseNumber);
+  if (state.instanceUrl && /^[a-zA-Z0-9]{15,18}$/.test(String(c.id))) {
+    const href = `${state.instanceUrl.replace(/\/+$/, "")}/lightning/r/Case/${c.id}/view`;
+    return `<a class="case-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" title="Open in Salesforce">${label}</a>`;
+  }
+  return `<strong>${label}</strong>`;
+}
+
+function csvCell(value) {
+  let s = String(value ?? "");
+  // Stop spreadsheet apps from running cell contents as formulas
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+function downloadCasesCsv(cases, filename) {
   const headers = ["CaseNumber", "Subject", "Assigned Agent", "Type", "Priority", "Origin", "RoutedDate", "AgeHours", "Status"];
   const nowMs = Date.now();
 
-  const rows = activeCases.map((c) => {
+  const lines = [headers.map(csvCell).join(",")];
+  cases.forEach((c) => {
     const ageHours = Math.floor((nowMs - c.routedDate.getTime()) / (1000 * 60 * 60));
-    return [
-      c.caseNumber,
-      `"${c.subject.replace(/"/g, '""')}"`,
-      `"${(c.agent || "Unassigned").replace(/"/g, '""')}"`,
-      c.type,
-      c.priority,
-      c.origin,
-      c.routedDate.toISOString(),
-      ageHours,
-      c.status
-    ];
+    lines.push(
+      [
+        c.caseNumber,
+        c.subject,
+        c.agent || "Unassigned",
+        c.type,
+        c.priority,
+        c.origin,
+        c.routedDate.toISOString(),
+        ageHours,
+        c.status
+      ].map(csvCell).join(",")
+    );
   });
 
-  const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map((e) => e.join(","))].join("\n");
+  // BOM so Excel reads UTF-8 correctly; Blob avoids the data-URL '#' truncation problem
+  const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
-  link.setAttribute("href", encodeURI(csvContent));
-  link.setAttribute("download", `queue_backlog_${state.selectedTab}_${state.timeRange}.csv`);
+  link.href = url;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* =========================================================================
+ * Drill-down: KPI cards + agent workload -> case list modal
+ * ========================================================================= */
+
+const DRILL_ROW_LIMIT = 500;
+const DRILL_TYPE_ORDER = ["Incident", "Service Request", "Query", "Feature Request"];
+
+function setupDrillDownListeners() {
+  // KPI cards
+  document.querySelectorAll(".kpi-card[data-kpi]").forEach((card) => {
+    const open = () => {
+      if (document.body.classList.contains("is-loading")) return;
+      openKpiDrill(card.dataset.kpi);
+    };
+    card.addEventListener("click", open);
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      }
+    });
+  });
+
+  // Agent workload table (names, per-type counts, totals, footer totals)
+  ["agentWorkloadTableBody", "agentWorkloadTableFoot"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("click", (e) => {
+      const btn = e.target.closest("button.agent-link, button.drill-link, button.drill-link-total");
+      if (!btn) return;
+      openAgentDrill(btn.dataset.agent || "", btn.dataset.type || "");
+    });
+  });
+
+  // Modal chrome
+  const modal = document.getElementById("drillModal");
+  if (!modal) return;
+
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal) closeDrill();
+  });
+
+  const closeBtn = document.getElementById("drillCloseBtn");
+  if (closeBtn) closeBtn.addEventListener("click", closeDrill);
+  const closeFooterBtn = document.getElementById("drillCloseFooterBtn");
+  if (closeFooterBtn) closeFooterBtn.addEventListener("click", closeDrill);
+
+  const search = document.getElementById("drillSearch");
+  if (search) {
+    search.addEventListener("input", (e) => {
+      state.drill.search = e.target.value;
+      renderDrill();
+    });
+  }
+
+  const chips = document.getElementById("drillChips");
+  if (chips) {
+    chips.addEventListener("click", (e) => {
+      const chip = e.target.closest(".drill-chip");
+      if (!chip) return;
+      state.drill.type = chip.dataset.type;
+      renderDrill();
+    });
+  }
+
+  const thead = modal.querySelector("thead");
+  if (thead) {
+    const sortBy = (th) => {
+      const key = th.dataset.sort;
+      if (!key) return;
+      const d = state.drill;
+      if (d.sortKey === key) {
+        d.sortDir = d.sortDir === "asc" ? "desc" : "asc";
+      } else {
+        d.sortKey = key;
+        d.sortDir = key === "routedDate" ? "desc" : "asc";
+      }
+      renderDrill();
+    };
+    thead.addEventListener("click", (e) => {
+      const th = e.target.closest("th[data-sort]");
+      if (th) sortBy(th);
+    });
+    thead.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const th = e.target.closest("th[data-sort]");
+      if (th) {
+        e.preventDefault();
+        sortBy(th);
+      }
+    });
+  }
+
+  const exportBtn = document.getElementById("drillExportBtn");
+  if (exportBtn) {
+    exportBtn.addEventListener("click", () => {
+      downloadCasesCsv(getDrillVisibleCases(), `${slugify(state.drill.title)}.csv`);
+    });
+  }
+
+  // Esc closes; Tab stays inside the dialog
+  document.addEventListener("keydown", (e) => {
+    if (!modal.classList.contains("open")) return;
+    if (e.key === "Escape") {
+      closeDrill();
+      return;
+    }
+    if (e.key === "Tab") {
+      const focusable = Array.from(
+        modal.querySelectorAll("button, input, select, a[href], th[tabindex='0']")
+      ).filter((el) => !el.disabled && el.offsetParent !== null);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  });
+}
+
+function openKpiDrill(kind) {
+  const cases = (state.kpiCases && state.kpiCases[kind]) || [];
+  const m = state.kpiMeta || {};
+  const windowElem = document.getElementById("dateRangeText");
+  const windowText = (windowElem ? windowElem.textContent : "").replace(/^Window:\s*/, "");
+  const n = cases.length;
+  const noun = n === 1 ? "case" : "cases";
+
+  let title = "Cases";
+  let subtitle = "";
+
+  switch (kind) {
+    case "total":
+      title = "Total Inflow";
+      subtitle = `${n} ${noun} routed into the queue • ${windowText}`;
+      break;
+    case "weekday":
+      title = "Daily Workday Average";
+      subtitle = `${n} weekday ${noun} ÷ ${m.workdays} workdays = ${m.dailyAvg} per day • Weekend cases are excluded`;
+      break;
+    case "peak":
+      title = `Peak Arrival Day — ${m.peakDay || "--"}`;
+      subtitle = `${n} ${noun} arrived on the busiest day of this window`;
+      break;
+    case "aging":
+      title = "Aging Cases (> 24h)";
+      subtitle = `${n} open (New / Assigned) ${noun} older than 24 hours`;
+      break;
+  }
+
+  if (state.selectedTab !== "ALL") subtitle += ` • Filtered to ${state.selectedTab}`;
+  openDrill(title, subtitle, cases);
+}
+
+function openAgentDrill(agent, type) {
+  // Same population the workload table counts: queue members only, within the selected week
+  const members = new Set(state.queueAgents || []);
+  const cases = getAgentScopedCases().filter(
+    (c) => members.has(c.agent) && (!agent || c.agent === agent) && (!type || c.type === type)
+  );
+
+  const weekSelect = document.getElementById("agentWeekSelect");
+  const weekText =
+    weekSelect && weekSelect.selectedIndex >= 0 ? weekSelect.options[weekSelect.selectedIndex].text : "";
+
+  let title = agent || "All Queue Agents";
+  if (type) title += ` — ${type}`;
+  const noun = cases.length === 1 ? "case" : "cases";
+  openDrill(title, `${cases.length} ${noun} • Week: ${weekText}`, cases);
+}
+
+function openDrill(title, subtitle, cases) {
+  const modal = document.getElementById("drillModal");
+  if (!modal) return;
+
+  const d = state.drill;
+  d.title = title;
+  d.cases = cases;
+  d.search = "";
+  d.type = "ALL";
+  d.sortKey = "routedDate";
+  d.sortDir = "desc";
+  d.lastFocus = document.activeElement;
+
+  document.getElementById("drillTitle").textContent = title;
+  document.getElementById("drillSubtitle").textContent = subtitle;
+  const search = document.getElementById("drillSearch");
+  if (search) search.value = "";
+
+  modal.classList.add("open");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+  renderDrill();
+  if (search) search.focus();
+}
+
+function closeDrill() {
+  const modal = document.getElementById("drillModal");
+  if (!modal || !modal.classList.contains("open")) return;
+  modal.classList.remove("open");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.style.overflow = "";
+  const prev = state.drill.lastFocus;
+  if (prev && typeof prev.focus === "function") prev.focus();
+}
+
+function getDrillVisibleCases() {
+  const d = state.drill;
+  const term = d.search.trim().toLowerCase();
+
+  const list = d.cases.filter((c) => {
+    if (d.type !== "ALL" && c.type !== d.type) return false;
+    if (!term) return true;
+    return [c.caseNumber, c.subject, c.agent, c.type, c.status, c.priority].some((v) =>
+      String(v || "").toLowerCase().includes(term)
+    );
+  });
+
+  const dir = d.sortDir === "asc" ? 1 : -1;
+  const valueOf = (c) =>
+    d.sortKey === "routedDate" ? c.routedDate.getTime() : String(c[d.sortKey] || "").toLowerCase();
+
+  list.sort((a, b) => {
+    const x = valueOf(a);
+    const y = valueOf(b);
+    if (x < y) return -1 * dir;
+    if (x > y) return 1 * dir;
+    return 0;
+  });
+
+  return list;
+}
+
+function renderDrill() {
+  const d = state.drill;
+
+  // Type chips (with counts) built from the full list for this drill-down
+  const typeCounts = {};
+  d.cases.forEach((c) => {
+    typeCounts[c.type] = (typeCounts[c.type] || 0) + 1;
+  });
+  const rank = (t) => {
+    const i = DRILL_TYPE_ORDER.indexOf(t);
+    return i === -1 ? 99 : i;
+  };
+  const chipDefs = [["ALL", `All (${d.cases.length})`]].concat(
+    Object.keys(typeCounts)
+      .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+      .map((t) => [t, `${t} (${typeCounts[t]})`])
+  );
+  const chipsElem = document.getElementById("drillChips");
+  if (chipsElem) {
+    chipsElem.innerHTML = chipDefs
+      .map(
+        ([val, label]) =>
+          `<button type="button" class="drill-chip${d.type === val ? " active" : ""}" data-type="${escapeHtml(val)}">${escapeHtml(label)}</button>`
+      )
+      .join("");
+  }
+
+  // Sort indicators
+  document.querySelectorAll("#drillModal th[data-sort]").forEach((th) => {
+    th.classList.remove("sorted-asc", "sorted-desc");
+    if (th.dataset.sort === d.sortKey) th.classList.add(d.sortDir === "asc" ? "sorted-asc" : "sorted-desc");
+  });
+
+  const visible = getDrillVisibleCases();
+  const shown = visible.slice(0, DRILL_ROW_LIMIT);
+
+  const countElem = document.getElementById("drillCount");
+  if (countElem) {
+    countElem.textContent =
+      visible.length > DRILL_ROW_LIMIT
+        ? `Showing first ${DRILL_ROW_LIMIT} of ${visible.length} (export CSV for all)`
+        : `Showing ${visible.length} of ${d.cases.length}`;
+  }
+
+  const tbody = document.getElementById("drillTableBody");
+  if (!tbody) return;
+
+  if (shown.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: #888; padding: 25px;">No cases match.</td></tr>`;
+    return;
+  }
+
+  const nowMs = Date.now();
+  const dateOpts = { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" };
+
+  tbody.innerHTML = shown
+    .map((c) => {
+      const ageHours = Math.max(0, Math.floor((nowMs - c.routedDate.getTime()) / (1000 * 60 * 60)));
+      const ageHtml =
+        isOpenStatus(c.status) && ageHours >= 24
+          ? `<span class="pill pill-critical">${formatAge(ageHours)}</span>`
+          : `<span class="muted-age">${formatAge(ageHours)}</span>`;
+      const pClass = String(c.priority || "medium").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+      const typeClass = "pill-type-" + String(c.type).toLowerCase().replace(/[^a-z]+/g, "-");
+
+      return `
+        <tr>
+          <td class="drill-nowrap">${caseNumberHtml(c)}</td>
+          <td class="drill-subject">${escapeHtml(c.subject)}</td>
+          <td class="drill-nowrap">${escapeHtml(c.agent)}</td>
+          <td class="drill-nowrap"><span class="pill ${typeClass}">${escapeHtml(c.type)}</span></td>
+          <td class="drill-nowrap"><span class="pill pill-${pClass}">${escapeHtml(c.priority)}</span></td>
+          <td class="drill-nowrap">${escapeHtml(c.status)}</td>
+          <td class="drill-nowrap">${escapeHtml(c.routedDate.toLocaleString("en-US", dateOpts))} ${ageHtml}</td>
+        </tr>`;
+    })
+    .join("");
 }

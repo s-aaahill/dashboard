@@ -162,11 +162,58 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.toolbar-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 .label-badge { font-size: 0.75rem; font-weight: 700; color: var(--sf-text-muted); text-transform: uppercase; }
 .window-range { font-size: 0.9rem; font-weight: 600; margin-left: 6px; }
 .toolbar-actions { display: flex; gap: 8px; }
+
+/* --- Custom date range --- */
+.custom-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-right: 10px;
+}
+
+.custom-range[hidden] { display: none; }
+
+.custom-range input[type="date"] {
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+  border: 1px solid var(--sf-border);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--sf-text-main);
+}
+
+.custom-range input[type="date"]:focus {
+  outline: none;
+  border-color: var(--sf-blue);
+  box-shadow: 0 0 0 2px rgba(1, 118, 211, 0.2);
+}
+
+.custom-range > span {
+  font-size: 0.8rem;
+  color: var(--sf-text-muted);
+}
+
+.custom-range-error {
+  color: var(--sf-red) !important;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
 
 /* --- KPI Cards --- */
 .kpi-grid {
@@ -468,3 +515,152 @@ body {
 }
 
 .is-loading #refreshDataBtn { opacity: 0.6; cursor: progress; }
+
+/* =========================================================================
+   Interactive drill-downs
+   ========================================================================= */
+
+/* Clickable KPI cards */
+.kpi-card { position: relative; }
+
+.kpi-clickable {
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+}
+
+.kpi-clickable:hover,
+.kpi-clickable:focus-visible {
+  border-color: var(--sf-blue);
+  box-shadow: 0 4px 12px rgba(1, 118, 211, 0.18);
+  transform: translateY(-2px);
+  outline: none;
+}
+
+.kpi-hint {
+  position: absolute;
+  right: 14px;
+  bottom: 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--sf-blue);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+}
+
+.kpi-clickable:hover .kpi-hint,
+.kpi-clickable:focus-visible .kpi-hint { opacity: 1; }
+
+/* Agent workload: clickable names and counts */
+.agent-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--sf-blue);
+  cursor: pointer;
+  text-align: left;
+}
+.agent-link:hover { text-decoration: underline; color: var(--sf-blue-hover); }
+
+.pill.drill-link {
+  border: none;
+  font-family: inherit;
+  cursor: pointer;
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+.pill.drill-link:hover { transform: translateY(-1px); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25); }
+
+.drill-link-total {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--sf-navy);
+  cursor: pointer;
+}
+.drill-link-total:hover { text-decoration: underline; color: var(--sf-blue); }
+
+.agent-link:focus-visible,
+.pill.drill-link:focus-visible,
+.drill-link-total:focus-visible {
+  outline: 2px solid var(--sf-blue);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Salesforce case links */
+.case-link { color: var(--sf-blue); font-weight: 700; text-decoration: none; }
+.case-link:hover { text-decoration: underline; }
+
+/* Drill-down modal */
+.modal-backdrop.open { display: flex; }
+
+.drill-window {
+  width: 96%;
+  max-width: 1200px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.drill-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  padding: 0.75rem 1.25rem;
+  background: #fafaf9;
+  border-bottom: 1px solid var(--sf-border);
+}
+
+.drill-search { flex: 0 1 280px; }
+
+.drill-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+
+.drill-chip {
+  border: 1px solid var(--sf-border);
+  background: #fff;
+  color: var(--sf-text-main);
+  border-radius: 14px;
+  padding: 3px 11px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.drill-chip:hover { background: var(--sf-light-blue); }
+.drill-chip.active { background: var(--sf-blue); border-color: var(--sf-blue); color: #fff; }
+
+.drill-toolbar-right { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+
+.drill-body { padding: 0; flex: 1; overflow: auto; max-height: none; }
+
+.drill-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.drill-table th:hover { color: var(--sf-blue); }
+.drill-table th.sorted-asc::after { content: " \25B2"; font-size: 0.65rem; }
+.drill-table th.sorted-desc::after { content: " \25BC"; font-size: 0.65rem; }
+
+.drill-subject { min-width: 260px; max-width: 520px; word-break: break-word; }
+.drill-nowrap { white-space: nowrap; }
+.muted-age { color: var(--sf-text-muted); font-size: 0.75rem; margin-left: 4px; }
+
+/* Ticket-type pills (neutral hues so they don't read as severity) */
+.pill-type-incident { background: #EDE7FB; color: #5B2EB0; }
+.pill-type-service-request { background: #E1F3FE; color: var(--sf-blue-hover); }
+.pill-type-query { background: #DDF4F1; color: #0B6B66; }
+.pill-type-feature-request { background: #FFF1D6; color: #8A5300; }
+
+@media (max-width: 700px) {
+  .drill-toolbar-right { margin-left: 0; width: 100%; justify-content: space-between; }
+  .drill-search { flex: 1 1 100%; }
+}

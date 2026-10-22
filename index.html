@@ -51,7 +51,20 @@
             <option value="pastWeek3">Past Week 3 (Days 15–21 ago)</option>
             <option value="pastWeek4">Past Week 4 (Days 22–28 ago)</option>
           </optgroup>
+          <optgroup label="Custom">
+            <option value="custom">Custom Range…</option>
+          </optgroup>
         </select>
+
+        <!-- Custom date range (shown only when "Custom Range…" is selected) -->
+        <div id="customRangeControls" class="custom-range" hidden>
+          <input type="date" id="customStartDate" aria-label="Start date" />
+          <span>to</span>
+          <input type="date" id="customEndDate" aria-label="End date" />
+          <button id="applyCustomRangeBtn" type="button" class="btn btn-sm btn-primary">Apply</button>
+          <span id="customRangeError" class="custom-range-error" role="alert"></span>
+        </div>
+
         <span class="window-range" id="dateRangeText">Loading timeframe...</span>
       </div>
       <div class="toolbar-actions">
@@ -84,40 +97,44 @@
 
     <!-- KPIs -->
     <section class="kpi-grid">
-      <div class="kpi-card">
+      <div class="kpi-card kpi-clickable" data-kpi="total" role="button" tabindex="0" aria-label="View the cases behind Total Inflow">
         <div class="kpi-header">
           <span class="kpi-title">TOTAL INFLOW</span>
           <span class="kpi-icon">📥</span>
         </div>
         <div class="kpi-value" id="kpiTotalInflow">0</div>
         <div class="kpi-subtext positive" id="kpiGrowth">▲ Total Routed Intake</div>
+        <span class="kpi-hint">View cases →</span>
       </div>
 
-      <div class="kpi-card">
+      <div class="kpi-card kpi-clickable" data-kpi="weekday" role="button" tabindex="0" aria-label="View the cases behind Daily Workday Average">
         <div class="kpi-header">
           <span class="kpi-title">DAILY WORKDAY AVERAGE</span>
           <span class="kpi-icon">📊</span>
         </div>
         <div class="kpi-value" id="kpiDailyAvg">0</div>
         <div class="kpi-subtext" id="kpiAvgSplit">5-day work week (Sat & Sun off)</div>
+        <span class="kpi-hint">View cases →</span>
       </div>
 
-      <div class="kpi-card">
+      <div class="kpi-card kpi-clickable" data-kpi="peak" role="button" tabindex="0" aria-label="View the cases behind Peak Arrival Day">
         <div class="kpi-header">
           <span class="kpi-title">PEAK ARRIVAL DAY</span>
           <span class="kpi-icon">⚡</span>
         </div>
         <div class="kpi-value" id="kpiPeakDay">--</div>
         <div class="kpi-subtext warning" id="kpiPeakCount">0 tickets arriving</div>
+        <span class="kpi-hint">View cases →</span>
       </div>
 
-      <div class="kpi-card">
+      <div class="kpi-card kpi-clickable" data-kpi="aging" role="button" tabindex="0" aria-label="View the cases behind Aging Cases">
         <div class="kpi-header">
           <span class="kpi-title">AGING CASES (> 24H)</span>
           <span class="kpi-icon">⚠️</span>
         </div>
         <div class="kpi-value" id="kpiAgingCases" style="color: #ea001e;">0</div>
         <div class="kpi-subtext warning" id="kpiAgingSubtext">New / Assigned > 24h</div>
+        <span class="kpi-hint">View cases →</span>
       </div>
     </section>
 
@@ -242,7 +259,50 @@
     </section>
   </main>
 
+  <!-- Drill-down modal: cases behind a KPI card or an agent's workload -->
+  <div class="modal-backdrop" id="drillModal" aria-hidden="true">
+    <div class="modal-window drill-window" role="dialog" aria-modal="true" aria-labelledby="drillTitle">
+      <div class="modal-header">
+        <div>
+          <h2 id="drillTitle">Cases</h2>
+          <p class="card-subtitle" id="drillSubtitle"></p>
+        </div>
+        <button type="button" class="close-btn" id="drillCloseBtn" aria-label="Close">&times;</button>
+      </div>
+
+      <div class="drill-toolbar">
+        <input type="text" id="drillSearch" class="table-search drill-search" placeholder="Search case #, subject, agent, status..." />
+        <div class="drill-chips" id="drillChips"></div>
+        <div class="drill-toolbar-right">
+          <span class="record-count" id="drillCount"></span>
+          <button type="button" class="btn btn-sm btn-outline" id="drillExportBtn">Export CSV</button>
+        </div>
+      </div>
+
+      <div class="modal-body drill-body">
+        <table class="slds-table drill-table">
+          <thead>
+            <tr>
+              <th data-sort="caseNumber" tabindex="0">Case Number</th>
+              <th data-sort="subject" tabindex="0">Subject</th>
+              <th data-sort="agent" tabindex="0">Assigned Agent</th>
+              <th data-sort="type" tabindex="0">Type</th>
+              <th data-sort="priority" tabindex="0">Priority</th>
+              <th data-sort="status" tabindex="0">Status</th>
+              <th data-sort="routedDate" tabindex="0">Routed / Age</th>
+            </tr>
+          </thead>
+          <tbody id="drillTableBody"></tbody>
+        </table>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="drillCloseFooterBtn">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Cache-busting script tag -->
-  <script src="app.js?v=3.2"></script>
+  <script src="app.js?v=3.4"></script>
 </body>
 </html>
